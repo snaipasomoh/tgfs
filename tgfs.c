@@ -12,13 +12,110 @@
 #include <fcntl.h>
 #include <stddef.h>
 #include <assert.h>
+#include <math.h>
 
-static struct tg_file {
+static struct tgfs_file{
 	const char *name;
 	char *content;
-} tgf_state, tgf_food, tgf_poo;
+} tgf_state, tgf_food, tgf_poo, tgf_dead;
 
-static void *tgfs_init(struct fuse_conn_info *conn, struct fuse_config *cfg){
+static struct tgfs_dir{
+	int poo_exists;
+	int food_exists;
+	int dead_exists;
+} dir_state = {.poo_exists = 0, .food_exists = 0, .dead_exists = 0};
+
+static struct tgfs_state{
+	int food;
+	int dirt;
+	time_t last_food;
+	time_t last_poo;
+} tg_state = {.food = 5, .dirt = 0};
+
+void state_to_cont (){
+	free(tgf_state.content);
+	char food[32];
+	char dirt[32];
+	strcpy(food, "Food: ");
+	strcpy(dirt, "Dirt: ");
+	for (int i = 0; i < 5; i++){
+		if (i < tg_state.food){
+			strcat(food, "#");
+		}
+		else{
+			strcat(food, ".");
+		}
+		if (i < tg_state.dirt){
+			strcat(dirt, "#");
+		}
+		else{
+			strcat(dirt, ".");
+		}
+	}
+	strcat(food, "\n");
+	strcat(dirt, "\n");
+
+	char new_cnt[64];
+	strcpy(new_cnt, food);
+	strcat(new_cnt, dirt);
+	tgf_state.content = strdup(new_cnt);
+}
+
+void update_state (){
+	if (dir_state.dead_exists){
+		return;
+	}
+
+	time_t now = time(NULL);
+	int ft = now - tg_state.last_food;
+	int pt = now - tg_state.last_poo;
+
+	if (ft >= 3600){
+		if ((tg_state.food -= ft / 3600) < 0){
+			tg_state.food = 0;
+		}
+		tg_state.last_food += 3600 * (ft / 3600);
+	}
+
+	if (!dir_state.poo_exists && (pt >= 7200)){
+		printf("poo\n");
+		dir_state.poo_exists = 1;
+		tg_state.last_poo += 7200;
+	}
+	if (dir_state.poo_exists && (pt >= 3600)){
+		printf("poo is here\n");
+		printf("%d\n", tg_state.dirt);
+		if ((tg_state.dirt += (now - tg_state.last_poo) / 3600) > 5){
+			tg_state.dirt = 5;
+		}
+		tg_state.last_poo += 3600 * ((now - tg_state.last_poo) / 3600);
+	}
+
+
+	if (tg_state.food == 0){
+		dir_state.dead_exists = 1;
+		tgf_dead.content = strdup ("I am dead, because it was no food\n");
+	}
+	else if (tg_state.dirt == 5){
+		dir_state.dead_exists = 1;
+		tgf_dead.content = strdup ("I am dead, because it was too dirty\n");
+	}
+	else{
+		if (dir_state.food_exists){
+			dir_state.food_exists = 0;
+			tg_state.food = 5;//+= (tg_state.food < 5) ? 1 : 0;
+			tg_state.last_food = time(NULL);
+		}
+		if (!dir_state.poo_exists){
+			printf("wtf\n");
+			tg_state.dirt = 0;//+= (tg_state.dirt < 5) ? 1 : 0;
+		}
+	}
+
+	state_to_cont();
+}
+
+static void *tgfs_init (struct fuse_conn_info *conn, struct fuse_config *cfg){
 	(void) conn;
 	cfg->kernel_cache = 1;
 	return NULL;
@@ -41,6 +138,11 @@ static int tgfs_getattr (const char *path, struct stat *st,
 		st->st_mode = S_IFREG | 0444;
 		st->st_nlink = 1;
 		st->st_size = strlen(tgf_state.content);
+	}
+	else if (strcmp(path+1, tgf_dead.name) == 0){
+		st->st_mode = S_IFREG | 0444;
+		st->st_nlink = 1;
+		st->st_size = strlen(tgf_dead.content);
 	}
 	else if (strcmp(path+1, tgf_poo.name) == 0){
 		st->st_mode = S_IFREG | 0222;
@@ -65,39 +167,68 @@ static int tgfs_readdir (const char *path, void *buffer, fuse_fill_dir_t filler,
 	(void) fi;
 	(void) flags;
 
-
-	filler(buffer, ".", NULL, 0, 0);
-	filler(buffer, "..", NULL, 0, 0);
 	if (strcmp(path, "/") != 0){
 			return -ENOENT;
 	}
+
+	filler(buffer, ".", NULL, 0, 0);
+	filler(buffer, "..", NULL, 0, 0);
+
+
+	update_state();
+
 	filler(buffer, tgf_state.name, NULL, 0, 0);
-	filler(buffer, tgf_poo.name, NULL, 0, 0);
+
+	if (dir_state.dead_exists){
+		filler(buffer, tgf_dead.name, NULL, 0, 0);
+	}
+	if (dir_state.poo_exists){
+		filler(buffer, tgf_poo.name, NULL, 0, 0);
+	}
+	if (dir_state.food_exists){
+		filler(buffer, tgf_food.name, NULL, 0, 0);
+	}
 	return 0;
 }
 
-static int tgfs_open(const char *path, struct fuse_file_info *fi){
-	if (strcmp(path+1, tgf_state.name) != 0){
+static int tgfs_utimens (const char *path, const struct timespec tv[2],
+						struct fuse_file_info *fi){
+
+	if (strcmp(path+1, tgf_food.name) != 0){
 		return -ENOENT;
 	}
-	// if ((fi->flags & O_ACCMODE) != O_RDONLY){
-	// 	return -EACCES;
-	// }
+
+	if (dir_state.food_exists){
+		return -ENOENT;
+	}
+
+	dir_state.food_exists = 1;
 	return 0;
 }
 
 static int tgfs_read (const char *path, char *buffer, size_t size, off_t offset,
 					struct fuse_file_info *fi){
 	(void) fi;
-	if (strcmp(path+1, tgf_state.name) != 0){
+	size_t len;
+	char *cnt;
+	if (strcmp(path+1, tgf_state.name) == 0){
+		update_state();
+		len = strlen(tgf_state.content);
+		cnt = tgf_state.content;
+	}
+	else if (strcmp(path+1, tgf_dead.name) == 0){
+		len = strlen(tgf_dead.content);
+		cnt = tgf_dead.content;
+	}
+	else{
 		return -ENOENT;
 	}
-	size_t len = strlen(tgf_state.content);
+
 	if (offset < len){
 		if (offset + size > len){
 			size = len - offset;
 		}
-		memcpy(buffer, tgf_state.content + offset, size);
+		memcpy(buffer, cnt + offset, size);
 	}
 	else{
 		size = 0;
@@ -105,23 +236,55 @@ static int tgfs_read (const char *path, char *buffer, size_t size, off_t offset,
 	return size;
 }
 
-static int tgfs_mknod(const char *path, mode_t mode, dev_t rdev)
-{
+static int tgfs_mknod (const char *path, mode_t mode, dev_t rdev){
+
+	// if (strcmp(path+1, "fp") == 0){
+	// 	if (tg_state.food < 5){
+	// 		tg_state.food++;
+	// 	}
+	// }
+	// if (strcmp(path+1, "fm") == 0){
+	// 	if (tg_state.food > 0){
+	// 		tg_state.food--;
+	// 	}
+	// }
+	// if (strcmp(path+1, "dp") == 0){
+	// 	if (tg_state.dirt < 5){
+	// 		tg_state.dirt++;
+	// 	}
+	// }
+	// if (strcmp(path+1, "dm") == 0){
+	// 	if (tg_state.dirt > 0){
+	// 		tg_state.dirt++;
+	// 	}
+	// }
+	// if (strcmp(path+1, "us") == 0){
+	// 	update_state();
+	// }
+
 	if (strcmp(path+1, tgf_food.name) != 0){
 		return -ENOENT;
 	}
 
-	if (mknod(path, mode, rdev) == -1)
-		return -errno;
+	if (dir_state.food_exists){
+		return -ENOENT;
+	}
+
+	dir_state.food_exists = 1;
 
 	return 0;
 }
 
-static int tgfs_unlink(const char *path){
-	printf("Path: %s\n", path);
-	if (unlink(path) == -1){
-		return -errno;
+static int tgfs_unlink (const char *path){
+	if (strcmp(path+1, tgf_poo.name) != 0){
+		return -ENOENT;
 	}
+
+	if (!dir_state.poo_exists){
+		return -ENOENT;
+	}
+
+	dir_state.poo_exists = 0;
 	return 0;
 }
 
@@ -129,7 +292,8 @@ static struct fuse_operations tg_operations = {
 	.init = tgfs_init,
 	.getattr = tgfs_getattr,
 	.readdir = tgfs_readdir,
-	.open = tgfs_open,
+	.utimens = tgfs_utimens,
+	// .open = tgfs_open,
 	.read = tgfs_read,
 	.mknod = tgfs_mknod,
 	.unlink = tgfs_unlink,
@@ -137,8 +301,19 @@ static struct fuse_operations tg_operations = {
 
 int main (int argc, char **argv){
 	tgf_state.name = strdup("state");
-	tgf_state.content = strdup("Food: ####.\nDirt: ##...\n");
+	state_to_cont(tgf_state.content, &tg_state);
+	tgf_dead.name = strdup("DEAD");
+	tgf_dead.content = strdup("");
 	tgf_poo.name = strdup("poo");
 	tgf_food.name = strdup("food");
-	return fuse_main(argc, argv, &tg_operations, NULL);
+	tg_state.last_food = time(NULL);
+	tg_state.last_poo = time(NULL);
+	int ret = fuse_main(argc, argv, &tg_operations, NULL);
+	free((void *)tgf_state.name);
+	free((void *)tgf_state.content);
+	free((void *)tgf_dead.name);
+	free((void *)tgf_dead.content);
+	free((void *)tgf_poo.name);
+	free((void *)tgf_food.name);
+	return ret;
 }
