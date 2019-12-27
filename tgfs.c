@@ -14,6 +14,9 @@
 #include <assert.h>
 #include <math.h>
 
+const int CH_TIME = 10;
+const int PCR_TIME = 20;
+
 static struct tgfs_file{
 	const char *name;
 	char *content;
@@ -70,29 +73,39 @@ void update_state (){
 	int ft = now - tg_state.last_food;
 	int pt = now - tg_state.last_poo;
 
-	if (ft >= 3600){
-		if ((tg_state.food -= ft / 3600) < 0){
+	if (ft >= CH_TIME){
+		if ((tg_state.food -= ft / CH_TIME) < 0){
 			tg_state.food = 0;
 		}
-		tg_state.last_food += 3600 * (ft / 3600);
+		tg_state.last_food += CH_TIME * (ft / CH_TIME);
 	}
 
-	if (!dir_state.poo_exists && (pt >= 7200)){
+	if (!dir_state.poo_exists && (pt >= PCR_TIME)){
 		printf("poo\n");
 		dir_state.poo_exists = 1;
-		tg_state.last_poo += 7200;
+		tg_state.last_poo += PCR_TIME;
 	}
-	if (dir_state.poo_exists && (pt >= 3600)){
+	if (dir_state.poo_exists && (pt >= CH_TIME)){
 		printf("poo is here\n");
 		printf("%d\n", tg_state.dirt);
-		if ((tg_state.dirt += (now - tg_state.last_poo) / 3600) > 5){
+		if ((tg_state.dirt += (now - tg_state.last_poo) / CH_TIME) > 5){
 			tg_state.dirt = 5;
 		}
-		tg_state.last_poo += 3600 * ((now - tg_state.last_poo) / 3600);
+		tg_state.last_poo += CH_TIME * ((now - tg_state.last_poo) / CH_TIME);
 	}
 
-
-	if (tg_state.food == 0){
+	if (tg_state.food == 0 && tg_state.dirt == 5){
+		dir_state.dead_exists = 1;
+		if (now - tg_state.last_food > now - tg_state.last_poo){
+			printf("here\n");
+			tgf_dead.content = strdup ("I am dead, because it was no food\n");
+		}
+		else{
+			tgf_dead.content = strdup ("I am dead, because it was too dirty\n");
+		}
+	}
+	else if (tg_state.food == 0){
+		printf("foo\n");
 		dir_state.dead_exists = 1;
 		tgf_dead.content = strdup ("I am dead, because it was no food\n");
 	}
@@ -203,6 +216,7 @@ static int tgfs_utimens (const char *path, const struct timespec tv[2],
 	}
 
 	dir_state.food_exists = 1;
+	update_state();
 	return 0;
 }
 
@@ -271,6 +285,7 @@ static int tgfs_mknod (const char *path, mode_t mode, dev_t rdev){
 	}
 
 	dir_state.food_exists = 1;
+	update_state();
 
 	return 0;
 }
@@ -285,6 +300,7 @@ static int tgfs_unlink (const char *path){
 	}
 
 	dir_state.poo_exists = 0;
+	update_state();
 	return 0;
 }
 
